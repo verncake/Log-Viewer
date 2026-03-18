@@ -1,7 +1,8 @@
 import os
 import glob
 import html
-from fastapi import FastAPI, HTTPException, Request, Cookie
+import hmac
+from fastapi import FastAPI, HTTPException, Request, Cookie, Form
 from fastapi.responses import HTMLResponse, RedirectResponse
 from jinja2 import Template
 import uvicorn
@@ -21,19 +22,15 @@ LOGIN_TEMPLATE = """
     <body class="h-full flex items-center justify-center p-4">
         <div class="w-full max-w-sm bg-slate-800 p-8 rounded-xl shadow-2xl border border-slate-700">
             <h1 class="text-2xl font-black text-white mb-6 text-center">Log Viewer <span class="text-indigo-500">Access</span></h1>
-            <input type="password" id="token" onkeydown="if(event.key==='Enter') login()" placeholder="Enter Access Token" class="w-full p-3 mb-4 bg-slate-900 text-white rounded border border-slate-600 focus:border-indigo-500 outline-none">
-            <button onclick="login()" class="w-full py-3 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded transition">Enter</button>
+            <form action="/login" method="post">
+                <input type="password" name="token" placeholder="Enter Access Token" class="w-full p-3 mb-4 bg-slate-900 text-white rounded border border-slate-600 focus:border-indigo-500 outline-none">
+                <button type="submit" class="w-full py-3 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded transition">Enter</button>
+            </form>
             <div id="error" class="text-red-400 text-sm mt-4 hidden text-center font-bold">Invalid Access Token</div>
         </div>
         <script>
-            const params = new URLSearchParams(window.location.search);
-            if (params.has('error')) {
+            if (new URLSearchParams(window.location.search).has('error')) {
                 document.getElementById('error').classList.remove('hidden');
-            }
-            function login() {
-                const token = document.getElementById('token').value;
-                document.cookie = "token=" + encodeURIComponent(token) + "; path=/; max-age=86400";
-                window.location.href = '/view';
             }
         </script>
     </body>
@@ -57,7 +54,9 @@ HTML_TEMPLATE = """
                     <div class="text-sm text-slate-400 bg-slate-800 px-3 py-1 rounded-full font-mono border border-slate-700">
                         {{ filename }}
                     </div>
-                    <button onclick="logout()" class="text-xs text-red-400 hover:text-red-300 font-bold">Logout</button>
+                    <form action="/logout" method="post">
+                        <button type="submit" class="text-xs text-red-400 hover:text-red-300 font-bold">Logout</button>
+                    </form>
                 </div>
             </header>
             <main>
@@ -71,12 +70,6 @@ HTML_TEMPLATE = """
                 </div>
             </main>
         </div>
-        <script>
-            function logout() {
-                document.cookie = "token=; path=/; max-age=0";
-                window.location.href = '/';
-            }
-        </script>
     </body>
 </html>
 """
@@ -85,11 +78,27 @@ HTML_TEMPLATE = """
 async def index():
     return LOGIN_TEMPLATE
 
+@app.post("/login")
+async def login(token: str = Form(...)):
+    SECRET_TOKEN = os.getenv("LOG_VIEW_TOKEN")
+    if not SECRET_TOKEN or not hmac.compare_digest(token, SECRET_TOKEN):
+        return RedirectResponse(url="/?error=1", status_code=303)
+    
+    response = RedirectResponse(url="/view", status_code=303)
+    response.set_cookie(key="token", value=token, httponly=True, secure=False, samesite="strict")
+    return response
+
+@app.post("/logout")
+async def logout():
+    response = RedirectResponse(url="/", status_code=303)
+    response.delete_cookie("token")
+    return response
+
 @app.get("/view", response_class=HTMLResponse)
 async def read_logs(token: str = Cookie(None)):
     SECRET_TOKEN = os.getenv("LOG_VIEW_TOKEN")
-    if token != SECRET_TOKEN:
-        return RedirectResponse(url="/?error=1")
+    if not SECRET_TOKEN or not token or not hmac.compare_digest(token, SECRET_TOKEN):
+        return RedirectResponse(url="/")
     
     files = glob.glob(os.path.join(LOG_DIR, "*.log"))
     if not files:
